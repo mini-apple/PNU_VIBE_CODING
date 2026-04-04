@@ -2,8 +2,7 @@ import json
 import os
 from datetime import date
 
-from langchain.output_parsers import OutputFixingParser
-from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
@@ -12,7 +11,7 @@ from schemas.models import EconomyReport
 
 def _get_llm() -> ChatOpenAI:
     return ChatOpenAI(
-        model=os.getenv("LLM_MODEL", "gpt-5-mini"),
+        model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
         temperature=0,
     )
 
@@ -24,7 +23,27 @@ ECONOMY_REPORT_PROMPT = ChatPromptTemplate.from_messages(
             """당신은 경제 뉴스 분석 전문가입니다.
 주어진 뉴스 문서를 바탕으로 오늘의 주요 경제 동향 리포트를 작성하세요.
 
-{format_instructions}
+반드시 아래 JSON 형식으로만 응답하세요. 코드블록 없이 순수 JSON만 출력하세요.
+{{
+  "report_date": "YYYY-MM-DD",
+  "headline_summary": "3줄 이내 핵심 요약",
+  "sections": [
+    {{
+      "section_title": "섹션 제목",
+      "content": "섹션 본문",
+      "articles": [
+        {{
+          "title": "기사 제목",
+          "url": "https://...",
+          "source": "언론사",
+          "one_line_summary": "한 줄 요약"
+        }}
+      ]
+    }}
+  ],
+  "key_indicators": ["코스피 XXXX", "원/달러 XXXX원"],
+  "total_articles_analyzed": 0
+}}
 
 작성 요구사항:
 - sections: "국내 경제", "글로벌 시장", "산업 동향" 등 2~3개 섹션
@@ -48,15 +67,14 @@ ECONOMY_REPORT_PROMPT = ChatPromptTemplate.from_messages(
 
 def generate_economy_news_report(docs: list[dict]) -> EconomyReport:
     llm = _get_llm()
-    parser = PydanticOutputParser(pydantic_object=EconomyReport)
-    fixing_parser = OutputFixingParser.from_llm(parser=parser, llm=llm)
+    parser = JsonOutputParser()
+    chain = ECONOMY_REPORT_PROMPT | llm | parser
 
-    chain = ECONOMY_REPORT_PROMPT | llm | fixing_parser
-
-    return chain.invoke(
+    result = chain.invoke(
         {
             "today": date.today().isoformat(),
             "docs": json.dumps(docs, ensure_ascii=False, indent=2),
-            "format_instructions": parser.get_format_instructions(),
         }
     )
+
+    return EconomyReport.model_validate(result)
