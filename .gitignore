@@ -1,0 +1,40 @@
+# 환경변수 / API 키
+.env
+.env.*
+!.env.example
+
+# 스펙 / 기획 문서 (내부용)
+seed.yaml
+raw-spec.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 가상환경
+.venv/
+venv/
+env/
+ENV/
+
+# ChromaDB 데이터 (영속화 시 생성되는 로컬 파일)
+data/
+
+# Streamlit 캐시
+.streamlit/secrets.toml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
