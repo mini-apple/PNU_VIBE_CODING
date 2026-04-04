@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import logging
 from typing import Callable
@@ -20,11 +22,23 @@ def get_client() -> chromadb.ClientAPI:
     return _client
 
 
+_COLLECTION_NAMES = ["field_news", "economy_news"]
+
+
 def reset_client() -> None:
-    """버튼 클릭 시 호출 — 세션 내 ChromaDB를 초기화합니다."""
-    global _client
-    _client = chromadb.EphemeralClient()
-    logger.info("ChromaDB 클라이언트 초기화 완료")
+    """버튼 클릭 시 호출 — 컬렉션만 삭제하여 데이터를 초기화합니다.
+
+    EphemeralClient를 재생성하면 ChromaDB 내부 Rust 바인딩 해제 오류가 발생하므로
+    클라이언트는 유지하고 컬렉션만 삭제합니다.
+    """
+    client = get_client()
+    for name in _COLLECTION_NAMES:
+        try:
+            client.delete_collection(name)
+            logger.info("ChromaDB 컬렉션 삭제: %s", name)
+        except Exception:
+            pass
+    logger.info("ChromaDB 컬렉션 초기화 완료")
 
 
 def _get_or_create_collection(collection_name: str) -> chromadb.Collection:

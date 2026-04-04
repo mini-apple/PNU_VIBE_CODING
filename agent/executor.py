@@ -1,121 +1,94 @@
+from __future__ import annotations
+
 import json
 import logging
-import os
-import re
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.tools import BaseTool
-from langchain_openai import ChatOpenAI
-
-from agent.prompts import FIELD_SYSTEM_PROMPT, ECONOMY_SYSTEM_PROMPT
-from agent.tools import (
-    search_news,
-    store_articles_to_vectordb,
-    query_vectordb,
-    generate_field_report,
-    generate_economy_report,
-)
 from constants import ECONOMY_QUERIES
+from rag.embedder import embed_text
+from rag.vectorstore import upsert_articles, query_collection
+from report.economy_generator import generate_economy_news_report
+from report.field_generator import generate_field_news_report
 from schemas.models import FieldNewsReport, EconomyReport, UserProfile
 from search.query_builder import build_field_queries
+from search.router import search_with_fallback
 
 logger = logging.getLogger(__name__)
 
-
-def _create_executor(tools: list[BaseTool], system_prompt: str) -> AgentExecutor:
-    llm = ChatOpenAI(
-        model=os.getenv("LLM_MODEL", "gpt-5-mini"),
-        temperature=0,
-    )
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ]
-    )
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    return AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=True,
-        max_iterations=12,
-        handle_parsing_errors=True,
-        return_intermediate_steps=True,
-    )
+RAG_TOP_K = 5
+MAX_RESULTS_PER_QUERY = 5
 
 
-def _extract_tool_output(intermediate_steps: list, tool_name: str) -> str | None:
-    """중간 단계에서 특정 Tool의 마지막 반환값을 추출합니다."""
-    result = None
-    for action, observation in intermediate_steps:
-        if hasattr(action, "tool") and action.tool == tool_name:
-            result = observation
-    return result
+def _collect_articles(queries: list[str], collection_name: str) -> list[dict]:
+    """쿼리 목록으로 뉴스를 검색하고 ChromaDB에 저장 후 기사 목록을 반환합니다."""
+    all_articles: list[dict] = []
+    seen_urls: set[str] = set()
+
+    for query in queries:
+        results = search_with_fallback(query, MAX_RESULTS_PER_QUERY)
+        for r in results:
+            url = r.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                all_articles.append(
+                    {
+                        "title": r.get("title", ""),
+                        "url": url,
+                        "source": r.get("source", url.split("/")[2] if url else "unknown"),
+                        "published_date": r.get("published_date"),
+                        "summary": r.get("content", ""),
+                        "keywords": [],
+                    }
+                )
+
+    logger.info("[%s] 검색 완료: %d건", collection_name, len(all_articles))
+
+    if all_articles:
+        chunk_count = upsert_articles(all_articles, collection_name, embed_text)
+        logger.info("[%s] ChromaDB 저장: %d chunks", collection_name, chunk_count)
+    else:
+        logger.warning("[%s] 검색 결과 없음 — 쿼리: %s", collection_name, queries)
+
+    return all_articles
 
 
-def _parse_json_from_text(text: str) -> str:
-    """텍스트에서 JSON 객체를 추출합니다."""
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        return match.group()
-    return text
+def _retrieve_docs(query: str, collection_name: str) -> list[dict]:
+    """ChromaDB에서 관련 청크를 검색합니다."""
+    docs = query_collection(query, collection_name, RAG_TOP_K, embed_text)
+    logger.info("[%s] RAG 검색 결과: %d chunks", collection_name, len(docs))
+    return docs
 
 
 def run_field_agent(profile: UserProfile) -> FieldNewsReport:
-    """분야 뉴스 AgentExecutor를 실행하고 FieldNewsReport를 반환합니다."""
+    """
+    분야 뉴스 파이프라인을 실행합니다.
+    Search → Store → RAG Query → LLM Report 순으로 직접 실행합니다.
+    """
     queries = build_field_queries(profile)
-    executor = _create_executor(
-        tools=[search_news, store_articles_to_vectordb, query_vectordb, generate_field_report],
-        system_prompt=FIELD_SYSTEM_PROMPT,
-    )
+    logger.info("분야 뉴스 쿼리 (%d개): %s", len(queries), queries)
 
-    input_text = f"""
-지원 분야: {profile.field}
-관심 기업: {json.dumps(profile.companies, ensure_ascii=False)}
-검색 쿼리: {json.dumps(queries, ensure_ascii=False)}
+    # Step 1 & 2: 검색 + ChromaDB 저장
+    _collect_articles(queries, "field_news")
 
-위 정보를 활용해 지원 분야 뉴스 리포트를 생성해주세요.
-"""
-    result = executor.invoke({"input": input_text})
+    # Step 3: RAG 검색
+    rag_query = f"{profile.field} 최신 기술 동향 산업 트렌드"
+    docs = _retrieve_docs(rag_query, "field_news")
 
-    # 중간 단계에서 generate_field_report 결과 우선 추출
-    report_json = _extract_tool_output(
-        result.get("intermediate_steps", []), "generate_field_report"
-    )
-    if not report_json:
-        report_json = _parse_json_from_text(result.get("output", "{}"))
-
-    try:
-        return FieldNewsReport.model_validate_json(report_json)
-    except Exception as e:
-        logger.error("FieldNewsReport 파싱 실패: %s\n원본: %s", e, report_json[:300])
-        raise
+    # Step 4: LLM 리포트 생성
+    return generate_field_news_report(profile.field, profile.companies, docs)
 
 
 def run_economy_agent() -> EconomyReport:
-    """경제 뉴스 AgentExecutor를 실행하고 EconomyReport를 반환합니다."""
-    executor = _create_executor(
-        tools=[search_news, store_articles_to_vectordb, query_vectordb, generate_economy_report],
-        system_prompt=ECONOMY_SYSTEM_PROMPT,
-    )
+    """
+    경제 뉴스 파이프라인을 실행합니다.
+    Search → Store → RAG Query → LLM Report 순으로 직접 실행합니다.
+    """
+    logger.info("경제 뉴스 쿼리 (%d개): %s", len(ECONOMY_QUERIES), ECONOMY_QUERIES)
 
-    input_text = f"""
-경제 뉴스 검색 쿼리: {json.dumps(ECONOMY_QUERIES, ensure_ascii=False)}
+    # Step 1 & 2: 검색 + ChromaDB 저장
+    _collect_articles(ECONOMY_QUERIES, "economy_news")
 
-위 쿼리를 활용해 오늘의 경제 뉴스 리포트를 생성해주세요.
-"""
-    result = executor.invoke({"input": input_text})
+    # Step 3: RAG 검색
+    docs = _retrieve_docs("오늘 주요 경제 동향 증시 환율 금리", "economy_news")
 
-    report_json = _extract_tool_output(
-        result.get("intermediate_steps", []), "generate_economy_report"
-    )
-    if not report_json:
-        report_json = _parse_json_from_text(result.get("output", "{}"))
-
-    try:
-        return EconomyReport.model_validate_json(report_json)
-    except Exception as e:
-        logger.error("EconomyReport 파싱 실패: %s\n원본: %s", e, report_json[:300])
-        raise
+    # Step 4: LLM 리포트 생성
+    return generate_economy_news_report(docs)
