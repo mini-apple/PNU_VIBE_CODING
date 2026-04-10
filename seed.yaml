@@ -1,0 +1,134 @@
+goal: >
+  취업 준비생이 Streamlit 사이드바에서 지원 분야·관심 기업·경력을 설정하고
+  "뉴스 수집 시작" 버튼을 클릭하면, 지원 분야 최신 뉴스·경제 뉴스 탭에
+  핵심 요약과 원문 링크가 포함된 AI 리포트를 출력하는 하루 바이브코딩 프로토타입.
+  (TAB 1: 지원 분야 산업 트렌드·기술 동향 뉴스 / TAB 2: 전반 경제 뉴스)
+
+constraints:
+  - "LLM: gpt-5-mini (OpenAI API, 접근 가능한 환경 전제)"
+  - "Embedding: text-embedding-3-small (OpenAI API)"
+  - "Agent: LangChain AgentExecutor (동적 Tool 선택 — 유연성 확보 목적)"
+  - "Vector DB: ChromaDB 인메모리 — 앱 재시작 시 초기화, 파일 영속 없음"
+  - "파이프라인 트리거: 사이드바 '뉴스 수집 시작' 버튼 클릭 시에만 실행"
+  - "검색: Tavily 우선, 실패 시 DuckDuckGo 자동 fallback"
+  - "UI: Streamlit 단독"
+  - "RAG only — Fine-tuning 없음"
+
+acceptance_criteria:
+  - "분야 뉴스 탭: 버튼 클릭 후 지원 분야 관련 최신 뉴스 섹션 리포트(산업 트렌드·기술 동향 등)와 클릭 가능한 원문 링크가 화면에 출력됨"
+  - "경제 뉴스 탭: 버튼 클릭 후 주요 지표 metric, 섹션 리포트, 원문 링크가 화면에 출력됨"
+  - "Tavily API 호출 실패 시 DuckDuckGo로 자동 전환되어 결과가 정상 출력됨"
+  - "리포트 JSON이 Pydantic OutputParser를 통과함 (FieldNewsReport / EconomyReport 스키마 파싱 오류 없음)"
+  - "README.md 작성 완료 (실행 방법, 환경변수 목록 포함)"
+
+non_goals:
+  - "사용자 인증(로그인/회원가입)"
+  - "뉴스 결과 저장·내보내기 (PDF, CSV 등)"
+  - "Streamlit 외 다른 UI 프레임워크 (React 등)"
+  - "다국어 지원 (영문 UI 등)"
+  - "알림 기능 (이메일, 슬랙 등)"
+  - "뉴스 원문 전체 크롤링 (링크 제공으로 대체)"
+  - "ChromaDB 파일 영속 및 TTL 관리"
+
+ontology_schema:
+  - name: UserProfile
+    description: 사이드바에서 입력받는 취준생 프로필
+    fields:
+      - name: field
+        type: string
+        description: 취준 분야 (예: 백엔드 개발, 금융, 마케팅, 경영, 인사, 기타 )
+      - name: companies
+        type: array
+        description: 관심 기업 목록 (예: ["네이버", "카카오", "삼성", "LG", "현대", "SK", "기타"])
+      - name: level
+        type: string
+        description: "경력 수준 — 신입 | 인턴 | 경력 1-3년"
+      - name: extra_keywords
+        type: array
+        description: 추가 키워드 (선택, 기본값 빈 배열)
+
+  - name: NewsArticle
+    description: 리포트 섹션에 포함되는 개별 기사 (링크 포함)
+    fields:
+      - name: title
+        type: string
+        description: 기사 제목
+      - name: url
+        type: string
+        description: 원문 링크 (필수)
+      - name: source
+        type: string
+        description: 출처 언론사
+      - name: one_line_summary
+        type: string
+        description: 한 줄 요약
+
+  - name: FieldNewsReport
+    description: 분야 뉴스 탭에 출력되는 최종 리포트 (지원 분야 산업 트렌드·기술 동향 중심)
+    fields:
+      - name: report_date
+        type: string
+        description: 리포트 생성 날짜
+      - name: target_field
+        type: string
+        description: 지원 분야 (예: 반도체, 백엔드 개발, AI·ML)
+      - name: target_companies
+        type: array
+        description: 관심 기업 목록 (해당 기업 관련 뉴스 우선 포함)
+      - name: headline_summary
+        type: string
+        description: 3줄 이내 핵심 요약
+      - name: sections
+        type: array
+        description: FieldNewsSection 목록 (예: 산업 트렌드, 기술 동향, 주요 기업 이슈)
+      - name: key_takeaways
+        type: array
+        description: 취준생 관점의 핵심 인사이트 (예: "삼성 HBM 수주 확대 — 반도체 수요 회복 신호")
+      - name: total_articles_analyzed
+        type: number
+        description: 분석한 총 기사 수
+
+  - name: EconomyReport
+    description: 경제 뉴스 탭에 출력되는 최종 리포트
+    fields:
+      - name: report_date
+        type: string
+        description: 리포트 생성 날짜
+      - name: headline_summary
+        type: string
+        description: 3줄 이내 핵심 요약
+      - name: sections
+        type: array
+        description: EconomyReportSection 목록 (국내 경제, 글로벌 시장 등)
+      - name: key_indicators
+        type: array
+        description: "주요 지표 목록 (예: 코스피 -1.2%, 원/달러 1380원)"
+      - name: total_articles_analyzed
+        type: number
+        description: 분석한 총 기사 수
+
+evaluation_principles:
+  - principle: correctness
+    weight: 0.4
+    description: 5개 acceptance criteria 모두 충족하는가?
+  - principle: constraints
+    weight: 0.3
+    description: gpt-5-mini, 인메모리 ChromaDB, AgentExecutor, 버튼 트리거 등 하드 제약을 모두 준수하는가?
+  - principle: quality
+    weight: 0.3
+    description: Pydantic 파싱 오류 없음, fallback 동작 정상, 원문 링크 클릭 가능 여부
+
+exit_conditions:
+  - "분야 뉴스·경제 뉴스 탭 양쪽에서 리포트 + 링크 정상 출력 확인"
+  - "Tavily → DuckDuckGo fallback 동작 확인"
+  - "Pydantic OutputParser 파싱 오류 없음 확인"
+  - "README.md 존재 및 실행 가이드 포함 확인"
+
+metadata:
+  version: "1.1"
+  ambiguity_score: 0.13
+  interview_summary: >
+    취준생 대상 Streamlit 뉴스 수집·요약 앱.
+    gpt-5-mini + LangChain AgentExecutor + ChromaDB 인메모리.
+    버튼 트리거, TAB 1(지원 분야 산업·기술 뉴스) / TAB 2(경제 뉴스) 분리.
+    Tavily→DuckDuckGo fallback, RAG only. 하루 바이브코딩 프로토타입.
